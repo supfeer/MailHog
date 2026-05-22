@@ -83,6 +83,11 @@ func BasicAuthHandler(h http.Handler) http.Handler {
 			return
 		}
 
+		if isHealthCheckRequest(req) {
+			h.ServeHTTP(w, req)
+			return
+		}
+
 		u, pw, ok := req.BasicAuth()
 		if !ok || !Authorised(u, pw) {
 			w.Header().Set("WWW-Authenticate", "Basic")
@@ -93,6 +98,13 @@ func BasicAuthHandler(h http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(f)
+}
+
+func isHealthCheckRequest(req *http.Request) bool {
+	if req.Method != "GET" {
+		return false
+	}
+	return req.URL.Path == "/healthz" || strings.HasSuffix(req.URL.Path, "/healthz")
 }
 
 // Listen binds to httpBindAddr
