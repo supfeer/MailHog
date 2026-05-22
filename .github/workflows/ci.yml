@@ -100,6 +100,12 @@ jobs:
             -p 127.0.0.1:11025:1025 \
             -e MH_STORAGE=maildir \
             -e MH_MAILDIR_PATH=/home/mailhog/maildir \
+            -e MH_MAINTENANCE_ENABLED=true \
+            -e MH_MAINTENANCE_INTERVAL=15m \
+            -e MH_MAINTENANCE_DELETE_OLDER_THAN=24h \
+            -e MH_MAINTENANCE_MAX_MAILDIR_SIZE=256Mi \
+            -e MH_MAINTENANCE_MAX_MESSAGES=5000 \
+            -e MH_MAINTENANCE_MIN_FREE_SPACE=16Mi \
             -v mailhog-perf-maildir:/home/mailhog/maildir \
             mailhog-perf:${{ github.sha }}
 

@@ -162,6 +162,259 @@ func TestMaildirDeleteOlderThanRemovesFilesAndCacheEntries(t *testing.T) {
 	}
 }
 
+func TestMaildirMaintenanceDeletesOlderThan(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-maintenance-age")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	now := time.Now()
+	writeMaildirTestMessage(t, dir, "old", "old", now.Add(-2*time.Hour))
+	writeMaildirTestMessage(t, dir, "new", "new", now)
+
+	maildir := CreateMaildir(dir)
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:         true,
+		Interval:        time.Hour,
+		DeleteOlderThan: time.Hour,
+	}
+
+	result, err := maildir.RunMaintenance("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := result.Deleted, 1; got != want {
+		t.Fatalf("got deleted %d, want %d", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
+		t.Fatalf("old message file still exists or stat failed with unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new")); err != nil {
+		t.Fatalf("new message file missing: %v", err)
+	}
+}
+
+func TestMaildirMaintenanceEvictsOldestByMaxBytes(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-maintenance-bytes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	writeMaildirTestMessageBody(t, dir, "old", "old", strings.Repeat("o", 2048), time.Unix(100, 0))
+	writeMaildirTestMessageBody(t, dir, "new", "new", "small", time.Unix(300, 0))
+	newSize := maildirTestFileSize(t, filepath.Join(dir, "new"))
+
+	maildir := CreateMaildir(dir)
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:  true,
+		Interval: time.Hour,
+		MaxBytes: newSize,
+	}
+
+	result, err := maildir.RunMaintenance("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := result.Deleted, 1; got != want {
+		t.Fatalf("got deleted %d, want %d", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
+		t.Fatalf("old message file still exists or stat failed with unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new")); err != nil {
+		t.Fatalf("new message file missing: %v", err)
+	}
+}
+
+func TestMaildirMaintenanceEvictsOldestByMaxMessages(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-maintenance-count")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	writeMaildirTestMessage(t, dir, "old", "old", time.Unix(100, 0))
+	writeMaildirTestMessage(t, dir, "middle", "middle", time.Unix(200, 0))
+	writeMaildirTestMessage(t, dir, "new", "new", time.Unix(300, 0))
+
+	maildir := CreateMaildir(dir)
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:     true,
+		Interval:    time.Hour,
+		MaxMessages: 2,
+	}
+
+	result, err := maildir.RunMaintenance("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := result.Deleted, 1; got != want {
+		t.Fatalf("got deleted %d, want %d", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
+		t.Fatalf("old message file still exists or stat failed with unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "middle")); err != nil {
+		t.Fatalf("middle message file missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new")); err != nil {
+		t.Fatalf("new message file missing: %v", err)
+	}
+}
+
+func TestMaildirMaintenanceEvictsOldestByMinFreeBytes(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-maintenance-free")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	writeMaildirTestMessageBody(t, dir, "old", "old", strings.Repeat("o", 512), time.Unix(100, 0))
+	writeMaildirTestMessageBody(t, dir, "new", "new", strings.Repeat("n", 128), time.Unix(300, 0))
+
+	maildir := CreateMaildir(dir)
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:      true,
+		Interval:     time.Hour,
+		MinFreeBytes: 600,
+	}
+	maildir.diskStats = maildirTestFreeBytesProvider(1200)
+
+	result, err := maildir.RunMaintenance("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := result.Deleted, 1; got != want {
+		t.Fatalf("got deleted %d, want %d", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
+		t.Fatalf("old message file still exists or stat failed with unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new")); err != nil {
+		t.Fatalf("new message file missing: %v", err)
+	}
+}
+
+func TestMaildirMaintenanceSkipsTempFiles(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-maintenance-temp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	now := time.Now()
+	writeMaildirTestMessage(t, dir, "old", "old", now.Add(-2*time.Hour))
+	tempPath := filepath.Join(dir, maildirTempPrefix+"active")
+	if err := ioutil.WriteFile(tempPath, []byte("temp"), 0660); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(tempPath, now.Add(-2*time.Hour), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	maildir := CreateMaildir(dir)
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:         true,
+		Interval:        time.Hour,
+		DeleteOlderThan: time.Hour,
+	}
+
+	if _, err := maildir.RunMaintenance("test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tempPath); err != nil {
+		t.Fatalf("temp file should be preserved: %v", err)
+	}
+}
+
+func TestMaildirCommitGuardEvictsOldMessagesAndKeepsCurrentWrite(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-guard-evict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	writeMaildirTestMessageBody(t, dir, "old", "old", strings.Repeat("o", 2048), time.Unix(100, 0))
+	maildir := CreateMaildir(dir)
+	writer, err := maildir.CreateMessageWriter(&data.SMTPMessage{
+		From: "sender@example.com",
+		To:   []string{"recipient@example.com"},
+		Helo: "localhost",
+	}, "mailhog.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteLine("Subject: current"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteLine(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteLine("body"); err != nil {
+		t.Fatal(err)
+	}
+
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:  true,
+		Interval: time.Hour,
+		MaxBytes: 1024,
+	}
+
+	id, _, err := writer.Commit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old")); !os.IsNotExist(err) {
+		t.Fatalf("old message file still exists or stat failed with unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, id)); err != nil {
+		t.Fatalf("current message file missing: %v", err)
+	}
+}
+
+func TestMaildirCommitGuardAbortsWhenLimitsCannotBeSatisfied(t *testing.T) {
+	dir, err := ioutil.TempDir("", "mailhog-maildir-guard-full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	maildir := CreateMaildir(dir)
+	maildir.maintenance = MaintenancePolicy{
+		Enabled:  true,
+		Interval: time.Hour,
+		MaxBytes: 1,
+	}
+
+	writer, err := maildir.CreateMessageWriter(&data.SMTPMessage{
+		From: "sender@example.com",
+		To:   []string{"recipient@example.com"},
+		Helo: "localhost",
+	}, "mailhog.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteLine("Subject: too large"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := writer.Commit(); err != ErrStorageLimitExceeded {
+		t.Fatalf("got error %v, want %v", err, ErrStorageLimitExceeded)
+	}
+
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), maildirTempPrefix) {
+			t.Fatalf("temp file %s should have been removed", file.Name())
+		}
+	}
+}
+
 func TestMaildirWriteMessageToStreamsMessageWithoutEnvelope(t *testing.T) {
 	dir, err := ioutil.TempDir("", "mailhog-maildir-download")
 	if err != nil {
@@ -282,12 +535,20 @@ func writeMaildirTestMessage(t *testing.T, dir, id, subject string, modTime time
 }
 
 func writeMaildirTestMessageTo(t *testing.T, dir, id, to, subject string, modTime time.Time) {
+	writeMaildirTestMessageBodyTo(t, dir, id, to, subject, "body", modTime)
+}
+
+func writeMaildirTestMessageBody(t *testing.T, dir, id, subject, body string, modTime time.Time) {
+	writeMaildirTestMessageBodyTo(t, dir, id, "recipient@example.com", subject, body, modTime)
+}
+
+func writeMaildirTestMessageBodyTo(t *testing.T, dir, id, to, subject, body string, modTime time.Time) {
 	t.Helper()
 
 	raw := &data.SMTPMessage{
 		From: "sender@example.com",
 		To:   []string{to},
-		Data: "Subject: " + subject + "\r\n\r\nbody",
+		Data: "Subject: " + subject + "\r\n\r\n" + body,
 		Helo: "localhost",
 	}
 	bytes, err := ioutil.ReadAll(raw.Bytes())
@@ -301,6 +562,36 @@ func writeMaildirTestMessageTo(t *testing.T, dir, id, to, subject string, modTim
 	}
 	if err := os.Chtimes(path, modTime, modTime); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func maildirTestFileSize(t *testing.T, path string) int64 {
+	t.Helper()
+
+	fileinfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fileinfo.Size()
+}
+
+func maildirTestFreeBytesProvider(capacity int64) maildirDiskStatsFunc {
+	return func(path string) (maildirDiskStatsSnapshot, error) {
+		files, err := ioutil.ReadDir(path)
+		if err != nil {
+			return maildirDiskStatsSnapshot{}, err
+		}
+		var used int64
+		for _, file := range files {
+			if file.IsDir() || strings.HasPrefix(file.Name(), maildirTempPrefix) {
+				continue
+			}
+			used += file.Size()
+		}
+		return maildirDiskStatsSnapshot{
+			FreeBytes:      capacity - used,
+			FreeBytesKnown: true,
+		}, nil
 	}
 }
 

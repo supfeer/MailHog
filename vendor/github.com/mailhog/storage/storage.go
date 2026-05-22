@@ -1,11 +1,16 @@
 package storage
 
 import (
+	"errors"
 	"io"
 	"time"
 
 	"github.com/mailhog/data"
 )
+
+// ErrStorageLimitExceeded is returned when storage maintenance cannot free
+// enough space for a new message.
+var ErrStorageLimitExceeded = errors.New("storage limits exceeded")
 
 // Storage represents a storage backend
 type Storage interface {
@@ -60,4 +65,42 @@ type MessageBodyChunk struct {
 // the whole message or its attachments.
 type BodyPreviewStorage interface {
 	LoadBodyChunk(id string, offset int64, limit int64, maxSize int64) (*MessageBodyChunk, error)
+}
+
+// MaintenancePolicy configures automatic storage cleanup. Limits are disabled
+// when their values are zero.
+type MaintenancePolicy struct {
+	Enabled         bool
+	Interval        time.Duration
+	DeleteOlderThan time.Duration
+	MaxBytes        int64
+	MaxMessages     int
+	MinFreeBytes    int64
+}
+
+// HasLimits reports whether any cleanup guard is configured.
+func (policy MaintenancePolicy) HasLimits() bool {
+	return policy.DeleteOlderThan > 0 || policy.MaxBytes > 0 || policy.MaxMessages > 0 || policy.MinFreeBytes > 0
+}
+
+// Active reports whether maintenance should run.
+func (policy MaintenancePolicy) Active() bool {
+	return policy.Enabled && policy.HasLimits()
+}
+
+// MaintenanceStats describes storage state before or after cleanup.
+type MaintenanceStats struct {
+	MessageCount   int
+	TotalBytes     int64
+	FreeBytes      int64
+	FreeBytesKnown bool
+}
+
+// MaintenanceResult describes one maintenance pass.
+type MaintenanceResult struct {
+	Reason     string
+	Deleted    int
+	FreedBytes int64
+	Before     MaintenanceStats
+	After      MaintenanceStats
 }

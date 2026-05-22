@@ -34,18 +34,19 @@ type maildirCacheEntry struct {
 }
 
 type maildirMessageWriter struct {
-	maildir     *Maildir
-	id          string
-	path        string
-	tempPath    string
-	file        maildirDataFile
-	raw         *data.SMTPMessage
-	headers     map[string][]string
-	lastHeader  string
-	inHeaders   bool
-	contentSize int
-	dirtyBytes  int
-	committed   bool
+	maildir      *Maildir
+	id           string
+	path         string
+	tempPath     string
+	file         maildirDataFile
+	raw          *data.SMTPMessage
+	headers      map[string][]string
+	lastHeader   string
+	inHeaders    bool
+	bytesWritten int64
+	contentSize  int
+	dirtyBytes   int
+	committed    bool
 }
 
 type maildirDataFile interface {
@@ -56,14 +57,17 @@ type maildirDataFile interface {
 
 // Maildir is a maildir storage backend
 type Maildir struct {
-	Path      string
-	mu        sync.RWMutex
-	entries   []*maildirCacheEntry
-	entryByID map[string]*maildirCacheEntry
+	Path          string
+	mu            sync.RWMutex
+	maintenanceMu sync.Mutex
+	maintenance   MaintenancePolicy
+	diskStats     maildirDiskStatsFunc
+	entries       []*maildirCacheEntry
+	entryByID     map[string]*maildirCacheEntry
 }
 
 // CreateMaildir creates a new maildir storage backend
-func CreateMaildir(path string) *Maildir {
+func CreateMaildir(path string, policies ...MaintenancePolicy) *Maildir {
 	if len(path) == 0 {
 		dir, err := ioutil.TempDir("", "mailhog")
 		if err != nil {
@@ -78,16 +82,31 @@ func CreateMaildir(path string) *Maildir {
 		}
 	}
 	log.Println("Maildir path is", path)
+	policy := MaintenancePolicy{}
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
+	if policy.Interval <= 0 {
+		policy.Interval = time.Hour
+	}
 	maildir := &Maildir{
-		Path:      path,
-		entryByID: make(map[string]*maildirCacheEntry),
+		Path:        path,
+		maintenance: policy,
+		diskStats:   maildirDiskStats,
+		entryByID:   make(map[string]*maildirCacheEntry),
 	}
 	go maildir.refreshLoop()
+	if policy.Active() {
+		go maildir.maintenanceLoop()
+	}
 	return maildir
 }
 
 // Store stores a message and returns its storage ID
 func (maildir *Maildir) Store(m *data.Message) (string, error) {
+	if err := maildir.guardStorage(maildirEstimateMessageBytes(m), 1, "store"); err != nil {
+		return "", err
+	}
 	id := string(m.ID)
 	path := filepath.Join(maildir.Path, id)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0660)
@@ -122,6 +141,9 @@ func (maildir *Maildir) Store(m *data.Message) (string, error) {
 // CreateMessageWriter stores SMTP DATA incrementally without retaining the
 // full body or attachments in memory.
 func (maildir *Maildir) CreateMessageWriter(m *data.SMTPMessage, hostname string) (MessageWriter, error) {
+	if err := maildir.guardStorage(0, 1, "message create"); err != nil {
+		return nil, err
+	}
 	id, err := data.NewMessageID(hostname)
 	if err != nil {
 		return nil, err
@@ -155,10 +177,10 @@ func (writer *maildirMessageWriter) WriteLine(line string) error {
 	if writer.file == nil {
 		return os.ErrClosed
 	}
-	if err := writeString(writer.file, line); err != nil {
+	if err := writer.writeString(line); err != nil {
 		return err
 	}
-	if err := writeString(writer.file, "\r\n"); err != nil {
+	if err := writer.writeString("\r\n"); err != nil {
 		return err
 	}
 	lineSize := len(line) + len("\r\n")
@@ -166,7 +188,10 @@ func (writer *maildirMessageWriter) WriteLine(line string) error {
 	writer.dirtyBytes += lineSize
 	writer.captureHeaderLine(line)
 	if writer.dirtyBytes >= maildirFlushInterval {
-		return writer.flush()
+		if err := writer.flush(); err != nil {
+			return err
+		}
+		return writer.maildir.guardStorage(writer.bytesWritten, 1, "message write")
 	}
 	return nil
 }
@@ -176,6 +201,10 @@ func (writer *maildirMessageWriter) Commit() (string, *data.Message, error) {
 		return "", nil, os.ErrClosed
 	}
 	if err := writer.flush(); err != nil {
+		writer.Abort()
+		return "", nil, err
+	}
+	if err := writer.maildir.guardStorage(writer.bytesWritten, 1, "message commit"); err != nil {
 		writer.Abort()
 		return "", nil, err
 	}
@@ -237,18 +266,24 @@ func (writer *maildirMessageWriter) flush() error {
 }
 
 func (writer *maildirMessageWriter) writeEnvelope() error {
-	if err := writeString(writer.file, "HELO:<"+writer.raw.Helo+">\r\n"); err != nil {
+	if err := writer.writeString("HELO:<" + writer.raw.Helo + ">\r\n"); err != nil {
 		return err
 	}
-	if err := writeString(writer.file, "FROM:<"+writer.raw.From+">\r\n"); err != nil {
+	if err := writer.writeString("FROM:<" + writer.raw.From + ">\r\n"); err != nil {
 		return err
 	}
 	for _, t := range writer.raw.To {
-		if err := writeString(writer.file, "TO:<"+t+">\r\n"); err != nil {
+		if err := writer.writeString("TO:<" + t + ">\r\n"); err != nil {
 			return err
 		}
 	}
-	return writeString(writer.file, "\r\n")
+	return writer.writeString("\r\n")
+}
+
+func (writer *maildirMessageWriter) writeString(value string) error {
+	n, err := io.WriteString(writer.file, value)
+	writer.bytesWritten += int64(n)
+	return err
 }
 
 func (writer *maildirMessageWriter) captureHeaderLine(line string) {
