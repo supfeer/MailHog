@@ -62,8 +62,63 @@ func (maildir *Maildir) guardStorage(pendingBytes int64, pendingMessages int, re
 	if !maildir.maintenance.Active() {
 		return nil
 	}
+	if !maildir.guardNeedsMaintenance(pendingBytes, pendingMessages) {
+		return nil
+	}
 	_, err := maildir.enforceMaintenance(reason, pendingBytes, pendingMessages)
 	return err
+}
+
+func (maildir *Maildir) guardNeedsMaintenance(pendingBytes int64, pendingMessages int) bool {
+	if pendingBytes < 0 {
+		pendingBytes = 0
+	}
+	if pendingMessages < 0 {
+		pendingMessages = 0
+	}
+
+	policy := maildir.maintenance
+	if policy.MaxBytes <= 0 && policy.MaxMessages <= 0 && policy.MinFreeBytes <= 0 {
+		return false
+	}
+
+	cacheReady, messageCount, totalBytes := maildir.cachedMaintenanceStats()
+	if !cacheReady {
+		return true
+	}
+
+	if policy.MaxBytes > 0 && totalBytes+pendingBytes > policy.MaxBytes {
+		return true
+	}
+	if policy.MaxMessages > 0 && messageCount+pendingMessages > policy.MaxMessages {
+		return true
+	}
+	if policy.MinFreeBytes > 0 {
+		diskStats := maildir.diskStats
+		if diskStats == nil {
+			diskStats = maildirDiskStats
+		}
+		disk, err := diskStats(maildir.Path)
+		if err != nil || !disk.FreeBytesKnown {
+			return true
+		}
+		if disk.FreeBytes < policy.MinFreeBytes {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (maildir *Maildir) cachedMaintenanceStats() (bool, int, int64) {
+	maildir.mu.RLock()
+	defer maildir.mu.RUnlock()
+
+	var totalBytes int64
+	for _, entry := range maildir.entries {
+		totalBytes += entry.size
+	}
+	return maildir.cacheReady, len(maildir.entries), totalBytes
 }
 
 func (maildir *Maildir) enforceMaintenance(reason string, pendingBytes int64, pendingMessages int) (MaintenanceResult, error) {

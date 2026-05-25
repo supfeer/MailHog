@@ -3,8 +3,10 @@ package smtp
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mailhog/data"
+	smtpproto "github.com/mailhog/smtp"
 	"github.com/mailhog/storage"
 )
 
@@ -88,6 +90,36 @@ func TestAcceptMessage(t *testing.T) {
 	}
 	if len(rbuf) == 0 {
 		t.Fatal("SMTP session wrote no replies")
+	}
+}
+
+func TestAcceptMessageDoesNotBlockWhenNotificationQueueIsFull(t *testing.T) {
+	c := &Session{
+		proto:       smtpproto.NewProtocol(),
+		storage:     storage.CreateInMemory(),
+		messageChan: make(chan *data.Message),
+	}
+	c.proto.Hostname = "localhost"
+	msg := &data.SMTPMessage{
+		From: "sender@example.com",
+		To:   []string{"recipient@example.com"},
+		Data: "Subject: nonblocking\r\n\r\nbody",
+		Helo: "localhost",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.acceptMessage(msg)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("acceptMessage blocked on realtime notification queue")
 	}
 }
 

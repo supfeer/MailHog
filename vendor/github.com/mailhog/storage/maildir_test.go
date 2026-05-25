@@ -126,6 +126,56 @@ func TestMaildirStoreUpdatesCacheImmediately(t *testing.T) {
 	}
 }
 
+func TestMaildirGuardSkipsFullMaintenanceWhenCachedLimitsAreHealthy(t *testing.T) {
+	maildir := &Maildir{
+		maintenance: MaintenancePolicy{
+			Enabled:     true,
+			MaxBytes:    10 * 1024,
+			MaxMessages: 10,
+		},
+		entries: []*maildirCacheEntry{
+			{id: "one", size: 1024},
+		},
+		cacheReady: true,
+	}
+
+	if maildir.guardNeedsMaintenance(1024, 1) {
+		t.Fatal("guard should skip full maintenance while cached size and count are below limits")
+	}
+}
+
+func TestMaildirGuardRequestsMaintenanceWhenCachedLimitsWouldBeExceeded(t *testing.T) {
+	maildir := &Maildir{
+		maintenance: MaintenancePolicy{
+			Enabled:     true,
+			MaxBytes:    2048,
+			MaxMessages: 2,
+		},
+		entries: []*maildirCacheEntry{
+			{id: "one", size: 1536},
+		},
+		cacheReady: true,
+	}
+
+	if !maildir.guardNeedsMaintenance(1024, 1) {
+		t.Fatal("guard should request full maintenance when pending write exceeds cached limits")
+	}
+}
+
+func TestMaildirGuardSkipsAgeOnlyCleanupOnWritePath(t *testing.T) {
+	maildir := &Maildir{
+		maintenance: MaintenancePolicy{
+			Enabled:         true,
+			DeleteOlderThan: time.Hour,
+		},
+		cacheReady: true,
+	}
+
+	if maildir.guardNeedsMaintenance(0, 1) {
+		t.Fatal("age-only cleanup should be left to scheduled maintenance")
+	}
+}
+
 func TestMaildirDeleteOlderThanRemovesFilesAndCacheEntries(t *testing.T) {
 	dir, err := ioutil.TempDir("", "mailhog-maildir-delete-older")
 	if err != nil {

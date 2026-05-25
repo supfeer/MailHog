@@ -12,6 +12,8 @@ import (
 	"github.com/mailhog/storage"
 )
 
+const messageChanBuffer = 1024
+
 // DefaultConfig is the default config
 func DefaultConfig() *Config {
 	return &Config{
@@ -26,7 +28,7 @@ func DefaultConfig() *Config {
 		CORSOrigin:          "",
 		WebPath:             "",
 		MaintenanceInterval: "1h",
-		MessageChan:         make(chan *data.Message),
+		MessageChan:         make(chan *data.Message, messageChanBuffer),
 		OutgoingSMTP:        make(map[string]*OutgoingSMTP),
 	}
 }

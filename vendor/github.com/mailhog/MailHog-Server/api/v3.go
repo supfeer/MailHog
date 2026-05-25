@@ -27,7 +27,7 @@ func createAPIv3(conf *config.Config, r *pat.Router) *APIv3 {
 	log.Println("Creating API v3 with WebPath: " + conf.WebPath)
 	apiv3 := &APIv3{
 		config:      conf,
-		messageChan: make(chan *data.Message),
+		messageChan: newRealtimeMessageChan(),
 		wsHub:       websockets.NewHub(),
 	}
 
@@ -53,6 +53,9 @@ func createAPIv3(conf *config.Config, r *pat.Router) *APIv3 {
 		for {
 			select {
 			case msg := <-apiv3.messageChan:
+				if !apiv3.hasSubscribers() {
+					continue
+				}
 				log.Println("Got message in APIv3 websocket channel")
 				apiv3.broadcast(msg)
 			}
@@ -60,6 +63,10 @@ func createAPIv3(conf *config.Config, r *pat.Router) *APIv3 {
 	}()
 
 	return apiv3
+}
+
+func (apiv3 *APIv3) hasSubscribers() bool {
+	return apiv3.wsHub != nil && apiv3.wsHub.SubscriberCount() > 0
 }
 
 func (apiv3 *APIv3) defaultOptions(w http.ResponseWriter, req *http.Request) {
@@ -246,6 +253,9 @@ func (apiv3 *APIv3) websocket(w http.ResponseWriter, req *http.Request) {
 func (apiv3 *APIv3) broadcast(msg *data.Message) {
 	log.Println("[APIv3] BROADCAST /api/v3/websocket")
 
+	if !apiv3.hasSubscribers() {
+		return
+	}
 	apiv3.wsHub.Broadcast(compactMessage(*msg))
 }
 

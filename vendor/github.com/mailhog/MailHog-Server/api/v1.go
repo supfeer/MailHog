@@ -28,6 +28,7 @@ import (
 type APIv1 struct {
 	config      *config.Config
 	messageChan chan *data.Message
+	stream      *goose.EventStream
 }
 
 // FIXME should probably move this into APIv1 struct
@@ -46,10 +47,11 @@ func createAPIv1(conf *config.Config, r *pat.Router) *APIv1 {
 	log.Println("Creating API v1 with WebPath: " + conf.WebPath)
 	apiv1 := &APIv1{
 		config:      conf,
-		messageChan: make(chan *data.Message),
+		messageChan: newRealtimeMessageChan(),
+		stream:      goose.NewEventStream(),
 	}
 
-	stream = goose.NewEventStream()
+	stream = apiv1.stream
 
 	r.Path(conf.WebPath + "/api/v1/messages").Methods("GET").HandlerFunc(apiv1.messages)
 	r.Path(conf.WebPath + "/api/v1/messages").Methods("DELETE").HandlerFunc(apiv1.delete_all)
@@ -79,6 +81,9 @@ func createAPIv1(conf *config.Config, r *pat.Router) *APIv1 {
 		for {
 			select {
 			case msg := <-apiv1.messageChan:
+				if !apiv1.hasSubscribers() {
+					continue
+				}
 				log.Println("Got message in APIv1 event stream")
 				eventMessage := loadFullMessage(apiv1.config.Storage, *msg)
 				bytes, _ := json.MarshalIndent(eventMessage, "", "  ")
@@ -94,6 +99,10 @@ func createAPIv1(conf *config.Config, r *pat.Router) *APIv1 {
 	return apiv1
 }
 
+func (apiv1 *APIv1) hasSubscribers() bool {
+	return apiv1.stream != nil && apiv1.stream.ReceiverCount() > 0
+}
+
 func (apiv1 *APIv1) defaultOptions(w http.ResponseWriter, req *http.Request) {
 	if len(apiv1.config.CORSOrigin) > 0 {
 		w.Header().Add("Access-Control-Allow-Origin", apiv1.config.CORSOrigin)
@@ -104,8 +113,11 @@ func (apiv1 *APIv1) defaultOptions(w http.ResponseWriter, req *http.Request) {
 
 func (apiv1 *APIv1) broadcast(json string) {
 	log.Println("[APIv1] BROADCAST /api/v1/events")
+	if apiv1.stream == nil {
+		return
+	}
 	b := []byte(json)
-	stream.Notify("data", b)
+	apiv1.stream.Notify("data", b)
 }
 
 // keepalive sends an empty keep alive message.
@@ -115,7 +127,9 @@ func (apiv1 *APIv1) broadcast(json string) {
 // unresponsive due to too many open files.
 func (apiv1 *APIv1) keepalive() {
 	log.Println("[APIv1] KEEPALIVE /api/v1/events")
-	stream.Notify("keepalive", []byte{})
+	if apiv1.stream != nil {
+		apiv1.stream.Notify("keepalive", []byte{})
+	}
 }
 
 func (apiv1 *APIv1) eventstream(w http.ResponseWriter, req *http.Request) {
@@ -127,7 +141,9 @@ func (apiv1 *APIv1) eventstream(w http.ResponseWriter, req *http.Request) {
 		w.Header().Add("Access-Control-Allow-Methods", "OPTIONS,GET,POST,DELETE")
 	}
 
-	stream.AddReceiver(w)
+	if apiv1.stream != nil {
+		apiv1.stream.AddReceiver(w)
+	}
 }
 
 func (apiv1 *APIv1) messages(w http.ResponseWriter, req *http.Request) {

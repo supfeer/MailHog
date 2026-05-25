@@ -2,10 +2,13 @@ package websockets
 
 import (
 	"net/http"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"github.com/ian-kent/go-log/log"
 )
+
+const hubMessageBuffer = 1024
 
 type Hub struct {
 	upgrader       websocket.Upgrader
@@ -13,6 +16,7 @@ type Hub struct {
 	messages       chan interface{}
 	registerChan   chan *connection
 	unregisterChan chan *connection
+	subscribers    int64
 }
 
 func NewHub() *Hub {
@@ -25,7 +29,7 @@ func NewHub() *Hub {
 			},
 		},
 		connections:    make(map[*connection]bool),
-		messages:       make(chan interface{}),
+		messages:       make(chan interface{}, hubMessageBuffer),
 		registerChan:   make(chan *connection),
 		unregisterChan: make(chan *connection),
 	}
@@ -38,6 +42,7 @@ func (h *Hub) run() {
 		select {
 		case c := <-h.registerChan:
 			h.connections[c] = true
+			atomic.AddInt64(&h.subscribers, 1)
 		case c := <-h.unregisterChan:
 			h.unregister(c)
 		case m := <-h.messages:
@@ -56,6 +61,7 @@ func (h *Hub) unregister(c *connection) {
 	if _, ok := h.connections[c]; ok {
 		close(c.send)
 		delete(h.connections, c)
+		atomic.AddInt64(&h.subscribers, -1)
 	}
 }
 
@@ -72,5 +78,16 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) Broadcast(data interface{}) {
-	h.messages <- data
+	if h.SubscriberCount() == 0 {
+		return
+	}
+	select {
+	case h.messages <- data:
+	default:
+		log.Println("WebSocket broadcast queue full, dropping message event")
+	}
+}
+
+func (h *Hub) SubscriberCount() int {
+	return int(atomic.LoadInt64(&h.subscribers))
 }

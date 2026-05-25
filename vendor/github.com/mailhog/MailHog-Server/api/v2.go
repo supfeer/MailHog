@@ -27,7 +27,7 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	log.Println("Creating API v2 with WebPath: " + conf.WebPath)
 	apiv2 := &APIv2{
 		config:      conf,
-		messageChan: make(chan *data.Message),
+		messageChan: newRealtimeMessageChan(),
 		wsHub:       websockets.NewHub(),
 	}
 
@@ -52,6 +52,9 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 		for {
 			select {
 			case msg := <-apiv2.messageChan:
+				if !apiv2.hasSubscribers() {
+					continue
+				}
 				log.Println("Got message in APIv2 websocket channel")
 				apiv2.broadcast(msg)
 			}
@@ -59,6 +62,10 @@ func createAPIv2(conf *config.Config, r *pat.Router) *APIv2 {
 	}()
 
 	return apiv2
+}
+
+func (apiv2 *APIv2) hasSubscribers() bool {
+	return apiv2.wsHub != nil && apiv2.wsHub.SubscriberCount() > 0
 }
 
 func (apiv2 *APIv2) defaultOptions(w http.ResponseWriter, req *http.Request) {
@@ -315,5 +322,8 @@ func (apiv2 *APIv2) websocket(w http.ResponseWriter, req *http.Request) {
 func (apiv2 *APIv2) broadcast(msg *data.Message) {
 	log.Println("[APIv2] BROADCAST /api/v2/websocket")
 
+	if !apiv2.hasSubscribers() {
+		return
+	}
 	apiv2.wsHub.Broadcast(loadFullMessage(apiv2.config.Storage, *msg))
 }
