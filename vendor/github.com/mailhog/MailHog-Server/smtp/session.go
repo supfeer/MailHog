@@ -114,15 +114,26 @@ func (c *Session) acceptMessage(msg *data.SMTPMessage) (id string, err error) {
 		if err != nil {
 			return "", err
 		}
-		c.messageChan <- m
+		c.publishMessage(m)
 		return id, nil
 	}
 
 	m := msg.Parse(c.proto.Hostname)
 	c.logf("Storing message %s", m.ID)
 	id, err = c.storage.Store(m)
-	c.messageChan <- m
+	c.publishMessage(m)
 	return
+}
+
+func (c *Session) publishMessage(m *data.Message) {
+	if c.messageChan == nil || m == nil {
+		return
+	}
+	select {
+	case c.messageChan <- m:
+	default:
+		c.logf("Dropping realtime notification for %s because the message queue is full", m.ID)
+	}
 }
 
 func (c *Session) beginMessage(msg *data.SMTPMessage) error {

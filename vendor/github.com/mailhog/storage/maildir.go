@@ -28,6 +28,7 @@ const (
 type maildirCacheEntry struct {
 	id         string
 	modTime    time.Time
+	size       int64
 	message    data.Message
 	searchTo   []string
 	searchFrom []string
@@ -64,6 +65,7 @@ type Maildir struct {
 	diskStats     maildirDiskStatsFunc
 	entries       []*maildirCacheEntry
 	entryByID     map[string]*maildirCacheEntry
+	cacheReady    bool
 }
 
 // CreateMaildir creates a new maildir storage backend
@@ -130,10 +132,12 @@ func (maildir *Maildir) Store(m *data.Message) (string, error) {
 	}
 
 	modTime := time.Now()
+	fileSize := int64(0)
 	if fileinfo, err := os.Stat(path); err == nil {
 		modTime = fileinfo.ModTime()
+		fileSize = fileinfo.Size()
 	}
-	maildir.putCacheEntry(newMaildirCacheEntry(id, modTime, m))
+	maildir.putCacheEntry(newMaildirCacheEntry(id, modTime, fileSize, m))
 
 	return id, nil
 }
@@ -222,8 +226,10 @@ func (writer *maildirMessageWriter) Commit() (string, *data.Message, error) {
 	writer.committed = true
 
 	modTime := time.Now()
+	fileSize := int64(0)
 	if fileinfo, err := os.Stat(writer.path); err == nil {
 		modTime = fileinfo.ModTime()
+		fileSize = fileinfo.Size()
 	}
 
 	msg := &data.Message{
@@ -236,7 +242,7 @@ func (writer *maildirMessageWriter) Commit() (string, *data.Message, error) {
 			Size:    writer.contentSize,
 		},
 	}
-	writer.maildir.putCacheEntry(newMaildirCacheEntry(writer.id, modTime, msg))
+	writer.maildir.putCacheEntry(newMaildirCacheEntry(writer.id, modTime, fileSize, msg))
 	if writer.contentSize >= maildirFlushInterval {
 		debug.FreeOSMemory()
 	}
@@ -846,6 +852,7 @@ func (maildir *Maildir) refreshCache() {
 		}
 	}
 	maildir.replaceCacheLocked(entries)
+	maildir.cacheReady = true
 	maildir.mu.Unlock()
 }
 
@@ -866,7 +873,7 @@ func (maildir *Maildir) loadCacheEntry(fileinfo os.FileInfo) (*maildirCacheEntry
 		return nil, err
 	}
 
-	return newMaildirCacheEntry(fileinfo.Name(), fileinfo.ModTime(), msg), nil
+	return newMaildirCacheEntry(fileinfo.Name(), fileinfo.ModTime(), fileinfo.Size(), msg), nil
 }
 
 func (maildir *Maildir) loadCompactMessage(fileinfo os.FileInfo) (*data.Message, error) {
@@ -979,6 +986,7 @@ func (maildir *Maildir) clearCache() {
 
 	maildir.entries = make([]*maildirCacheEntry, 0)
 	maildir.entryByID = make(map[string]*maildirCacheEntry)
+	maildir.cacheReady = true
 }
 
 func (maildir *Maildir) replaceCacheLocked(entries []*maildirCacheEntry) {
@@ -996,12 +1004,13 @@ func (maildir *Maildir) replaceCacheLocked(entries []*maildirCacheEntry) {
 	}
 }
 
-func newMaildirCacheEntry(id string, modTime time.Time, msg *data.Message) *maildirCacheEntry {
+func newMaildirCacheEntry(id string, modTime time.Time, size int64, msg *data.Message) *maildirCacheEntry {
 	msg.ID = data.MessageID(id)
 	msg.Created = modTime
 	return &maildirCacheEntry{
 		id:         id,
 		modTime:    modTime,
+		size:       size,
 		message:    compactMaildirMessage(msg),
 		searchTo:   maildirSearchTo(msg),
 		searchFrom: maildirSearchFrom(msg),

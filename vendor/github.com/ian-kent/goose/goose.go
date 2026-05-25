@@ -40,6 +40,10 @@ type EventReceiver struct {
 // Notify sends the event to all event stream receivers
 func (es *EventStream) Notify(event string, bytes []byte) {
 	// TODO reader?
+	receivers := es.snapshotReceivers()
+	if len(receivers) == 0 {
+		return
+	}
 
 	lines := strings.Split(string(bytes), "\n")
 
@@ -51,9 +55,27 @@ func (es *EventStream) Notify(event string, bytes []byte) {
 	sz := len(data) + 1
 	size := fmt.Sprintf("%X", sz)
 
-	for _, er := range es.receivers {
+	for _, er := range receivers {
 		go er.send(size, data)
 	}
+}
+
+func (es *EventStream) ReceiverCount() int {
+	es.mutex.Lock()
+	defer es.mutex.Unlock()
+
+	return len(es.receivers)
+}
+
+func (es *EventStream) snapshotReceivers() []*EventReceiver {
+	es.mutex.Lock()
+	defer es.mutex.Unlock()
+
+	receivers := make([]*EventReceiver, 0, len(es.receivers))
+	for _, er := range es.receivers {
+		receivers = append(receivers, er)
+	}
+	return receivers
 }
 
 func (er *EventReceiver) send(size, data string) {
